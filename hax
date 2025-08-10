@@ -1,0 +1,371 @@
+-- Services
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Config
+local CROSSHAIR_RADIUS = 50
+local CROSSHAIR_THICKNESS = 2
+local CROSSHAIR_COLOR = Color3.new(1, 1, 1)
+local FLY_SPEED = 64
+local AUTO_SHOT_COOLDOWN = 0.15
+
+-- State
+local ESPs = {}
+local BoxESPs = {}
+local keysPressed = {}
+local lastShotTime = 0
+local hue = 0
+
+-- Toggle flags
+local aimbotEnabled = false
+local flyEnabled = false
+local espEnabled = true
+
+-- Bones to track
+local Bones = {
+    "Head", "UpperTorso", "LowerTorso",
+    "LeftUpperArm", "LeftLowerArm", "LeftHand",
+    "RightUpperArm", "RightLowerArm", "RightHand",
+    "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+    "RightUpperLeg", "RightLowerLeg", "RightFoot"
+}
+
+-- Utility Functions
+local function IsEnemy(player1, player2)
+    return player1.Team ~= player2.Team
+end
+
+local function CreateLine()
+    local line = Drawing.new("Line")
+    line.Visible = true
+    line.Thickness = 2
+    line.Color = Color3.new(1, 0, 0)
+    return line
+end
+
+local function CreateBox()
+    local box = Drawing.new("Square")
+    box.Visible = true
+    box.Thickness = 2
+    box.Color = Color3.new(1, 0, 0)
+    box.Filled = false
+    return box
+end
+
+local crosshair = Drawing.new("Circle")
+crosshair.Visible = true
+crosshair.Radius = CROSSHAIR_RADIUS
+crosshair.Thickness = CROSSHAIR_THICKNESS
+crosshair.Color = CROSSHAIR_COLOR
+crosshair.Transparency = 0.6
+crosshair.Filled = false
+
+local function GetBonePositions(character)
+    local positions = {}
+    for _, name in ipairs(Bones) do
+        local part = character:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            positions[name] = part.Position
+        end
+    end
+    return positions
+end
+
+local function SetupESPForPlayer(player)
+    local connections = {
+        {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+        {"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+        {"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+        {"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+        {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"}
+    }
+    local lines = {}
+    for _ = 1, #connections do
+        table.insert(lines, CreateLine())
+    end
+    ESPs[player] = {Lines = lines, Connections = connections}
+
+    local box = CreateBox()
+    BoxESPs[player] = box
+end
+
+local function RemoveESPForPlayer(player)
+    if ESPs[player] then
+        for _, line in ipairs(ESPs[player].Lines) do
+            line.Visible = false
+            line:Remove()
+        end
+        ESPs[player] = nil
+    end
+    if BoxESPs[player] then
+        BoxESPs[player].Visible = false
+        BoxESPs[player]:Remove()
+        BoxESPs[player] = nil
+    end
+end
+
+local function GetBoundingBox2D(character)
+    local parts = {
+        character:FindFirstChild("UpperTorso"),
+        character:FindFirstChild("LowerTorso"),
+        character:FindFirstChild("Head"),
+        character:FindFirstChild("LeftFoot"),
+        character:FindFirstChild("RightFoot")
+    }
+    local points2D = {}
+
+    for _, part in ipairs(parts) do
+        if part and part:IsA("BasePart") then
+            local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
+            if onScreen then
+                table.insert(points2D, Vector2.new(pos.X, pos.Y))
+            end
+        end
+    end
+
+    if #points2D == 0 then return nil end
+
+    local minX = math.huge
+    local minY = math.huge
+    local maxX = -math.huge
+    local maxY = -math.huge
+
+    for _, point in ipairs(points2D) do
+        if point.X < minX then minX = point.X end
+        if point.Y < minY then minY = point.Y end
+        if point.X > maxX then maxX = point.X end
+        if point.Y > maxY then maxY = point.Y end
+    end
+
+    local width = maxX - minX
+    local height = maxY - minY
+
+    return Vector2.new(minX, minY), width, height
+end
+
+local function AutoShot()
+    local currentTime = os.clock()
+    if currentTime - lastShotTime >= AUTO_SHOT_COOLDOWN then
+        lastShotTime = currentTime
+        print("AutoShot fired!")
+    end
+end
+
+local function FlyStep()
+    local character = LocalPlayer.Character
+    if not character or not character:FindFirstChild("HumanoidRootPart") then return end
+
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local moveVec = Vector3.zero
+    local camLook = Camera.CFrame.LookVector
+    local camRight = Camera.CFrame.RightVector
+    local camUp = Vector3.new(0, 1, 0)
+
+    if keysPressed["W"] then moveVec += camLook end
+    if keysPressed["S"] then moveVec -= camLook end
+    if keysPressed["A"] then moveVec -= camRight end
+    if keysPressed["D"] then moveVec += camRight end
+    if keysPressed["Space"] then moveVec += camUp end
+    if keysPressed["LeftControl"] then moveVec -= camUp end
+
+    if moveVec.Magnitude > 0 then
+        flyVelocity = moveVec.Unit * FLY_SPEED
+    else
+        flyVelocity = Vector3.zero
+    end
+
+    root.Velocity = flyVelocity
+end
+
+-- Setup ESP for existing players
+for _, player in ipairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer then
+        SetupESPForPlayer(player)
+    end
+end
+
+Players.PlayerAdded:Connect(function(player)
+    player.CharacterAdded:Connect(function()
+        SetupESPForPlayer(player)
+    end)
+end)
+
+Players.PlayerRemoving:Connect(RemoveESPForPlayer)
+
+-- Input
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.W then keysPressed["W"] = true
+    elseif input.KeyCode == Enum.KeyCode.A then keysPressed["A"] = true
+    elseif input.KeyCode == Enum.KeyCode.S then keysPressed["S"] = true
+    elseif input.KeyCode == Enum.KeyCode.D then keysPressed["D"] = true
+    elseif input.KeyCode == Enum.KeyCode.Space then keysPressed["Space"] = true
+    elseif input.KeyCode == Enum.KeyCode.LeftControl then keysPressed["LeftControl"] = true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.W then keysPressed["W"] = false
+    elseif input.KeyCode == Enum.KeyCode.A then keysPressed["A"] = false
+    elseif input.KeyCode == Enum.KeyCode.S then keysPressed["S"] = false
+    elseif input.KeyCode == Enum.KeyCode.D then keysPressed["D"] = false
+    elseif input.KeyCode == Enum.KeyCode.Space then keysPressed["Space"] = false
+    elseif input.KeyCode == Enum.KeyCode.LeftControl then keysPressed["LeftControl"] = false
+    end
+end)
+
+-- Create GUI Menu
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "CheatMenuGui"
+screenGui.Parent = PlayerGui
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 220, 0, 150)
+frame.Position = UDim2.new(0, 20, 0, 20)
+frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+frame.Active = true
+frame.Draggable = true
+
+local title = Instance.new("TextLabel")
+title.Text = "Cheat Menu"
+title.Size = UDim2.new(1, 0, 0, 30)
+title.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+title.TextColor3 = Color3.new(1,1,1)
+title.Font = Enum.Font.SourceSansBold
+title.TextSize = 20
+title.Parent = frame
+
+local function CreateToggle(name, posY)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -20, 0, 30)
+    btn.Position = UDim2.new(0, 10, 0, posY)
+    btn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.Font = Enum.Font.SourceSans
+    btn.TextSize = 18
+    btn.Text = name .. ": OFF"
+    btn.Parent = frame
+    btn.AutoButtonColor = true
+
+    local toggled = false
+    btn.MouseButton1Click:Connect(function()
+        toggled = not toggled
+        btn.Text = name .. (toggled and ": ON" or ": OFF")
+        btn.BackgroundColor3 = toggled and Color3.fromRGB(0, 170, 0) or Color3.fromRGB(50, 50, 50)
+        if name == "Aimbot" then
+            aimbotEnabled = toggled
+        elseif name == "Fly" then
+            flyEnabled = toggled
+            if not toggled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                LocalPlayer.Character.HumanoidRootPart.Velocity = Vector3.zero
+            end
+        elseif name == "ESP" then
+            espEnabled = toggled
+            for p, data in pairs(ESPs) do
+                for _, line in ipairs(data.Lines) do
+                    line.Visible = toggled
+                end
+                if BoxESPs[p] then
+                    BoxESPs[p].Visible = toggled
+                end
+            end
+        end
+    end)
+    return btn
+end
+
+local aimbotToggle = CreateToggle("Aimbot", 40)
+local flyToggle = CreateToggle("Fly", 80)
+local espToggle = CreateToggle("ESP", 120)
+espToggle.Text = "ESP: ON"
+espToggle.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+espEnabled = true
+
+-- Main Render Loop
+RunService.RenderStepped:Connect(function(dt)
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    crosshair.Position = center
+
+    hue = (hue + dt * 0.3) % 1
+    local rainbowColor = Color3.fromHSV(hue, 1, 1)
+
+    for player, data in pairs(ESPs) do
+        if not espEnabled or not player.Character or not IsEnemy(LocalPlayer, player) then
+            for _, line in ipairs(data.Lines) do
+                line.Visible = false
+            end
+            if BoxESPs[player] then
+                BoxESPs[player].Visible = false
+            end
+        else
+            local bones = GetBonePositions(player.Character)
+            for i, connection in ipairs(data.Connections) do
+                local a, b = bones[connection[1]], bones[connection[2]]
+                local line = data.Lines[i]
+                if a and b then
+                    local a2D, aOnScreen = Camera:WorldToViewportPoint(a)
+                    local b2D, bOnScreen = Camera:WorldToViewportPoint(b)
+                    if aOnScreen and bOnScreen then
+                        line.Visible = true
+                        line.From = Vector2.new(a2D.X, a2D.Y)
+                        line.To = Vector2.new(b2D.X, b2D.Y)
+                        line.Color = rainbowColor
+                    else
+                        line.Visible = false
+                    end
+                else
+                    line.Visible = false
+                end
+            end
+
+            local box = BoxESPs[player]
+            if box then
+                local pos2D, width, height = GetBoundingBox2D(player.Character)
+                if pos2D and width > 0 and height > 0 then
+                    box.Visible = true
+                    box.Position = pos2D
+                    box.Size = Vector2.new(width, height)
+                    box.Color = rainbowColor
+                else
+                    box.Visible = false
+                end
+            end
+        end
+    end
+
+    if aimbotEnabled then
+        local closest, dist = nil, math.huge
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and IsEnemy(LocalPlayer, plr) and plr.Character and plr.Character:FindFirstChild("Head") then
+                local head = plr.Character.Head
+                local screen, onScreen = Camera:WorldToViewportPoint(head.Position)
+                if onScreen then
+                    local mousePos = UserInputService:GetMouseLocation()
+                    local diff = (Vector2.new(screen.X, screen.Y) - Vector2.new(mousePos.X, mousePos.Y)).Magnitude
+                    if diff < dist then
+                        closest = plr
+                        dist = diff
+                    end
+                end
+            end
+        end
+        if closest and closest.Character then
+            local head = closest.Character:FindFirstChild("Head")
+            if head then
+                local dir = (head.Position - Camera.CFrame.Position).Unit
+                Camera.CFrame = CFrame.new(Camera.CFrame.Position, Camera.CFrame.Position + dir)
+                AutoShot()
+            end
+        end
+    end
+
+    if flyEnabled then
+        FlyStep()
+    end
+end)
